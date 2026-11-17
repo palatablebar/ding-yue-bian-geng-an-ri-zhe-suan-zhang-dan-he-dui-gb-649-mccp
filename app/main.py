@@ -23,11 +23,14 @@ from .modules.m5_changes import service as change_service
 from .modules.m6_invoices import handler as m6_handler
 from .modules.m6_invoices import service as invoice_service
 from .modules.m7_export import handler as m7_handler
+from .modules.m8_settlement import handler as m8_handler
+from .modules.m8_settlement import service as settlement_service
 from .store import Store
 
 MODULES = (m1_handler, m2_handler, m3_handler, m4_handler, m5_handler, m6_handler,
-           m7_handler)
-PAGE_PATHS = ("/", "/subscriptions", "/calendar", "/proration", "/changes", "/invoices")
+           m7_handler, m8_handler)
+PAGE_PATHS = ("/", "/subscriptions", "/calendar", "/proration", "/changes", "/invoices",
+              "/settlements")
 
 
 def _tables(settings, run: dict | None) -> tuple[object, object] | tuple[None, None]:
@@ -69,9 +72,11 @@ def create_app(settings: config.Settings | None = None) -> FastAPI:
             "runs": len(app.state.store.list_runs(1)),
         }
 
-    def _render(request: Request, template: str, active: str, **extra):
+    def _render(request: Request, template: str, active: str,
+                run_override: dict | None = None, **extra):
         ctx = app.state.ctx
-        context = web.page_context(ctx, request.query_params.get("run_id"), active)
+        context = web.page_context(ctx, request.query_params.get("run_id"), active,
+                                   run_override=run_override)
         context.update(extra)
         return app.state.templates.TemplateResponse(
             request, template, context)
@@ -81,9 +86,14 @@ def create_app(settings: config.Settings | None = None) -> FastAPI:
         store = app.state.store
         run = app.state.ctx.current_run(request.query_params.get("run_id"))
         runs = ingest_service.run_rows(store, 12)
+        settlement_runs = settlement_service.run_rows(store, 12)
         return _render(request, "index.html", "index", runs=runs,
+                       settlement_runs=settlement_runs,
+                       settlement_totals=settlement_service.totals_view(store),
                        sample_subscriptions=settings.default_subscriptions,
                        sample_changes=settings.default_changes,
+                       sample_contracts=settings.default_contracts,
+                       sample_issued=settings.default_issued,
                        stages=store.list_stages(run["run_id"]) if run else [],
                        ledgers=store.list_reconciliations(run["run_id"]) if run else [],
                        totals=store.list_totals(run["run_id"]) if run else {})
@@ -138,6 +148,23 @@ def create_app(settings: config.Settings | None = None) -> FastAPI:
             "invoices": [], "ledgers": [], "totals": {}}
         return _render(request, "invoices.html", "invoices", invoices=data["invoices"],
                        ledgers=data["ledgers"], totals=data["totals"])
+
+    @app.get("/settlements")
+    def page_settlements(request: Request):
+        store = app.state.store
+        settlement_run = settlement_service.latest_settlement_run(store)
+        run_id = settlement_run["run_id"] if settlement_run else ""
+        data = settlement_service.overview(store, run_id)
+        return _render(
+            request, "settlements.html", "settlements",
+            run_override=settlement_run or {},
+            settlement_run=settlement_run,
+            contracts=data["contracts"] if run_id else [],
+            settlements=settlement_service.settlement_rows(store),
+            totals=settlement_service.totals_view(store),
+            settlement_ledgers=data["ledgers"],
+            policy_label=config.TERMINATION_POLICY_LABELS[config.TERMINATION_POLICY],
+            settlement_status_labels=config.SETTLEMENT_STATUS_LABELS)
 
     def _head_ok() -> Response:
         return Response(status_code=200, media_type="text/html; charset=utf-8")

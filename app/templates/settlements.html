@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+{% block title %}终止结算{% endblock %}
+{% block body %}
+<section class="block">
+  <div class="block-head">
+    <h2>终止结算总体</h2>
+    <span class="sub">方案：{{ policy_label }}</span>
+  </div>
+  <dl class="run-meta">
+    <div>
+      <dt>结算单</dt>
+      <dd class="num">{{ totals.settlements }}</dd>
+    </div>
+    <div>
+      <dt>合同承诺(元)</dt>
+      <dd class="num">{{ totals.commitment }}</dd>
+    </div>
+    <div>
+      <dt>已出账单冲抵(元)</dt>
+      <dd class="num">{{ totals.issued }}</dd>
+    </div>
+    <div>
+      <dt>本期终止结算(元)</dt>
+      <dd class="num" id="settlement-payable">{{ totals.payable }}</dd>
+    </div>
+    <div>
+      <dt>最终应收(元)</dt>
+      <dd class="num" id="settlement-final">{{ totals.final_receivable }}</dd>
+    </div>
+  </dl>
+  <p class="notice">
+    唯一公式：合同承诺 = 已出账单 + 本期终止结算 = 最终应收。
+    停机日只解释未履行区间与天数，不缩减承诺本金；已出月份逐张冲抵，不重复收费。
+  </p>
+</section>
+
+{% if settlement_run %}
+<section class="block">
+  <div class="block-head">
+    <h2>结算批次</h2>
+    <span class="sub">{{ settlement_run.run_id }} · 校验位 {{ check_digit }}</span>
+  </div>
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>结算单号</th>
+          <th>合同号</th>
+          <th>账户</th>
+          <th>合同期间</th>
+          <th>停机日</th>
+          <th>未履行区间</th>
+          <th class="num">已服务天</th>
+          <th class="num">未履行天</th>
+          <th class="num">承诺(元)</th>
+          <th class="num">已出(元)</th>
+          <th class="num">本期结算(元)</th>
+          <th class="num">最终应收(元)</th>
+          <th>状态</th>
+          <th>标记</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in settlements %}
+        <tr class="row-link" data-settlement="{{ row.settlement_id }}" tabindex="0" title="查看结算明细">
+          <td><code>{{ row.settlement_id }}</code></td>
+          <td><code>{{ row.contract_id }}</code></td>
+          <td class="account" title="{{ row.account }}">{{ row.account }}</td>
+          <td><code>[{{ row.contract_start }}, {{ row.contract_end }})</code></td>
+          <td><code>{{ row.stopped_on }}</code></td>
+          <td><code>{{ row.unserved_range }}</code></td>
+          <td class="num">{{ row.served_days }}</td>
+          <td class="num">{{ row.unserved_days }}</td>
+          <td class="num">{{ row.commitment }}</td>
+          <td class="num">{{ row.issued }}</td>
+          <td class="num">{{ row.payable }}</td>
+          <td class="num">{{ row.final_receivable }}</td>
+          <td class="nowrap">{{ settlement_status_labels.get(row.status, row.status) }}</td>
+          <td>
+            <div class="marks">
+              {% for code in row.flags %}<span class="tag tag-warn">{{ reason_labels.get(code, code) }}</span>{% endfor %}
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <ul class="link-list">
+    <li><a class="btn" href="/api/settlements.csv">终止结算 CSV</a></li>
+    <li><a class="btn" href="/api/settlements/detail.csv">结算明细 CSV</a></li>
+    <li><a class="btn" href="/api/settlements/manifest.json">结算清单 JSON</a></li>
+  </ul>
+</section>
+
+<section class="block">
+  <div class="block-head">
+    <h2>合同与已出账单</h2>
+    <span class="sub">逐份合同核对停机日、承诺、已出月份</span>
+  </div>
+  {% if contracts %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>合同号</th>
+          <th>订阅号</th>
+          <th>账户</th>
+          <th>合同期间</th>
+          <th class="num">承诺(元)</th>
+          <th>停机日</th>
+          <th>已出月份</th>
+          <th class="num">已出(元)</th>
+          <th class="num">最终应收(元)</th>
+          <th>结算</th>
+          <th>留档指令</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in contracts %}
+        <tr>
+          <td><code>{{ row.contract_id }}</code></td>
+          <td><code>{{ row.sub_id }}</code></td>
+          <td class="account" title="{{ row.account }}">{{ row.account }}</td>
+          <td><code>[{{ row.contract_start }}, {{ row.contract_end }})</code></td>
+          <td class="num">{{ row.commitment_cents|money }}</td>
+          <td>{% if row.stopped_on %}<code>{{ row.stopped_on }}</code>{% else %}—{% endif %}</td>
+          <td>
+            {% if row.issued %}
+            <div class="marks">
+              {% for item in row.issued %}<span class="tag{% if not item.credited %} tag-bad{% endif %}" title="{% if item.credited %}参与冲抵{% else %}账期重叠，已隔离，不参与冲抵{% endif %}">{{ item.invoice_id }} · {{ item.amount }}{% if not item.credited %} · 未冲抵{% endif %}</span>{% endfor %}
+            </div>
+            {% else %}—{% endif %}
+          </td>
+          <td class="num">{{ row.issued_cents|money }}</td>
+          <td class="num">{{ row.final_receivable_cents|money }}</td>
+          <td><code>{{ row.settlement.settlement_id if row.settlement else "未终止" }}</code></td>
+          <td>
+            {% for item in row.superseded_directives %}
+            <span class="tag tag-warn">{{ item.stopped_on }} {{ item.termination_id }}</span>
+            {% else %}—{% endfor %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">这一批没有合同记录。</p>
+  {% endif %}
+</section>
+
+<section class="block">
+  <div class="block-head">
+    <h2>结算对账</h2>
+    <span class="sub">四本账：结算单 / 承诺 / 已出账单冲抵 / 终止指令</span>
+  </div>
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>账</th>
+          <th class="num">左</th>
+          <th class="num">右</th>
+          <th class="num">差</th>
+          <th>结论</th>
+          <th>说明</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in settlement_ledgers %}
+        <tr>
+          <td>{{ row.label }}</td>
+          <td class="num">{{ row.left_text }}</td>
+          <td class="num">{{ row.right_text }}</td>
+          <td class="num">{{ row.diff_text }}</td>
+          <td>{% if row.status == "ok" %}<span class="tag tag-ok">平</span>{% else %}<span class="tag tag-bad">不平</span>{% endif %}</td>
+          <td><code>{{ row.note }}</code></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% else %}
+<p class="empty">还没有终止结算批次，先在首页采信合同与已出账单。</p>
+{% endif %}
+
+<dialog class="detail" id="settlement-dialog">
+  <form method="dialog" style="text-align:right"><button class="btn btn-ghost" type="submit">关闭</button></form>
+  <h3 id="settlement-title">—</h3>
+  <div id="settlement-body"></div>
+</dialog>
+{% endblock %}
+{% block scripts %}
+<script src="/static/settlements.js" defer></script>
+{% endblock %}

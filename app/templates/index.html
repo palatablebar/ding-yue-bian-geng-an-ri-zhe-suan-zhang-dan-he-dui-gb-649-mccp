@@ -18,6 +18,80 @@
     <button class="btn" type="button" id="run-import">采信</button>
     <span class="toast" id="import-toast" role="status"></span>
   </div>
+  <div class="form-row">
+    <div class="field">
+      <label for="contract-file">合同文件</label>
+      <input type="text" id="contract-file" value="{{ sample_contracts }}" autocomplete="off">
+    </div>
+    <div class="field">
+      <label for="issued-file">已出账单文件</label>
+      <input type="text" id="issued-file" value="{{ sample_issued }}" autocomplete="off">
+    </div>
+    <button class="btn" type="button" id="run-settlement">终止结算</button>
+    <span class="toast" id="settlement-toast" role="status"></span>
+  </div>
+</section>
+
+{% if settlement_totals.settlements %}
+<section class="block">
+  <div class="block-head">
+    <h2>终止结算</h2>
+    <span class="sub">{{ settlement_totals.settlements }} 张 · 最终应收 {{ settlement_totals.final_receivable }} 元</span>
+  </div>
+  <dl class="run-meta">
+    <div><dt>合同承诺</dt><dd class="num">{{ settlement_totals.commitment }}</dd></div>
+    <div><dt>已出账单</dt><dd class="num">{{ settlement_totals.issued }}</dd></div>
+    <div><dt>本期结算</dt><dd class="num">{{ settlement_totals.payable }}</dd></div>
+    <div><dt>最终应收</dt><dd class="num">{{ settlement_totals.final_receivable }}</dd></div>
+  </dl>
+  <ul class="link-list">
+    <li><a class="btn" href="/settlements">看终止结算</a></li>
+    <li><a class="btn btn-ghost" href="/api/settlements.csv">结算 CSV</a></li>
+  </ul>
+</section>
+{% endif %}
+
+<section class="block">
+  <div class="block-head">
+    <h2>结算批次</h2>
+    <span class="sub">最近 {{ settlement_runs|length }} 批</span>
+  </div>
+  {% if settlement_runs %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>批次号</th>
+          <th>校验位</th>
+          <th>状态</th>
+          <th>生成时间</th>
+          <th class="num">结算单</th>
+          <th class="num">承诺(元)</th>
+          <th class="num">本期结算(元)</th>
+          <th class="num">最终应收(元)</th>
+          <th class="num">隔离行</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in settlement_runs %}
+        <tr>
+          <td><code>{{ item.run_id }}</code></td>
+          <td><code>{{ item.check_digit }}</code></td>
+          <td>{{ item.status|run_status }}</td>
+          <td><code>{{ item.created_at|local }}</code></td>
+          <td class="num">{{ item.settlements }}</td>
+          <td class="num">{{ item.commitment_cents|money }}</td>
+          <td class="num">{{ item.payable_cents|money }}</td>
+          <td class="num">{{ item.final_receivable_cents|money }}</td>
+          <td class="num">{{ item.quarantined_rows }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">还没有终止结算批次。</p>
+  {% endif %}
 </section>
 
 <section class="block">

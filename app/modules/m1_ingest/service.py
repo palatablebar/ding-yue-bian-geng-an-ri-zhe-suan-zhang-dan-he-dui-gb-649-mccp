@@ -146,7 +146,7 @@ def import_sample(store, settings, subscriptions: str | None = None,
 
 def run_rows(store, limit: int = 20) -> list[dict]:
     rows = []
-    for run in store.list_runs(limit):
+    for run in store.list_runs(limit, kind="billing"):
         totals = store.list_totals(run["run_id"])
         rows.append({
             "run_id": run["run_id"],

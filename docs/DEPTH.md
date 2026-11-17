@@ -15,6 +15,7 @@
 | M5 变更抵扣 | 看变更序列、被替代关系与抵扣行 | GET /api/changes | `app/modules/m5_changes/segments.py` `app/modules/m5_changes/credit.py` | `tests/test_changes.py` `tests/test_credit.py` |
 | M6 账单对账 | 出账、点行看明细、核对四本账 | GET /api/invoices | `app/modules/m6_invoices/invoice.py` `app/modules/m6_invoices/reconcile.py` | `tests/test_invoices.py` `tests/test_reconcile.py` |
 | M7 导出 | 导出账单 CSV、分段 CSV、运行清单 JSON | GET /api/export/invoices.csv | `app/modules/m7_export/csv_out.py` `app/modules/m7_export/manifest_out.py` | `tests/test_export.py` `tests/test_export_manifest.py` |
+| M8 终止结算 | 采信合同与已出账单，按停机日出一张终止结算单 | POST /api/settlements/import | `app/modules/m8_settlement/rules.py` `app/modules/m8_settlement/settlement.py` `app/modules/m8_settlement/service.py` | `tests/test_settlement.py` |
 
 端到端与不变量分别由 `tests/test_e2e.py`、`tests/test_invariants.py` 固定。
 
@@ -33,6 +34,11 @@
 | TRAP-23 | 期间端点归属与相邻段接缝 | 两端都算，重复计一天 | 半开 `[start, end)`，相邻段 end 等于下段 start | `app/modules/m5_changes/segments.py`、`app/modules/m2_calendar/days.py` | `tests/test_calendar.py::test_adjacent_segments_cover_period`、`tests/test_changes.py::test_change_on_period_start_zero_day_segment` |
 | TRAP-24 | 抵扣行、补收行各自四舍五入 | 分完合计比总额多 1 分 | 最大余额法把差额补到小数余额最大的分量，负数抵扣同样成立 | `app/modules/m4_proration/rounding.py` | `tests/test_rounding.py::test_largest_remainder_keeps_total`、`tests/test_credit.py::test_component_cents_sum_to_invoice` |
 | TRAP-25 | 同一订阅同一时刻两条变更 | 取到哪条看文件顺序，重跑结果会变 | 同日只让 (生效时刻, 变更号) 最小的一条生效，其余标 `R_CHANGE_OVERLAP` 并记替代关系 | `app/modules/m3_quality/service.py`、`app/modules/m5_changes/segments.py` | `tests/test_changes.py::test_same_instant_overlap_deterministic`、`tests/test_invariants.py::test_change_order_independence` |
+| TRAP-30 | 年度合同中途终止：运营要按停机日缩到当天，财务要未履行承诺本期结清 | 两套算法并存，最终应收一个缩小一个扩到整份合同，页面与导出各算一遍 | 承诺不可撤销：`已出账单 + 本期结算 = 最终应收 = 合同承诺`，停机日只解释未履行区间与天数 | `app/modules/m8_settlement/rules.py`、`app/modules/m8_settlement/settlement.py` | `tests/test_settlement.py::test_stop_boundary_is_inclusive_and_does_not_shrink_commitment`、`tests/test_settlement.py::test_every_settlement_reconciles_three_ways` |
+| TRAP-31 | 终止时把已出月份又按剩余天数重新计价 | 已出月份被二次收费，或已出账单和结算单两头都算 | 已出账单逐张冲抵成负数行，结算只收 `承诺 − 已出` | `app/modules/m8_settlement/settlement.py::settlement_lines` | `tests/test_settlement.py::test_terminated_contract_lines_credit_each_issued_invoice` |
+| TRAP-32 | 同一终止指令重跑、或输入微调后重采信 | 每跑一次多一张结算单，应收翻倍 | 批次按 `batch_key` 复用；结算单号 `ST-<停机年月>-<合同号>`；发布按 `(合同号, 指令键)` 版本化，单 active | `app/modules/m8_settlement/service.py`、`app/store.py::publish_settlement_versions` | `tests/test_settlement.py::test_rerun_same_input_reuses_batch`、`tests/test_settlement.py::test_same_directive_new_input_does_not_add_a_second_settlement` |
+| TRAP-33 | 发布到一半失败：旧结算单已作废、新单没写进去 | 页面空窗或半新半旧，最终应收说不清 | 核对在写库前完成；作废旧版与写新版本同一事务，失败整体回滚 | `app/store.py::publish_settlement_versions`、`app/modules/m8_settlement/service.py::_run` | `tests/test_settlement.py::test_publish_failure_restores_whole_previous_version`、`tests/test_settlement.py::test_store_publish_rolls_back_all_versions_on_failure` |
+| TRAP-34 | 已出账单账期重叠（链式 A∩B、B∩C） | 重复收费被冲抵两次，或把首尾两张合法账单一起废掉 | 按 `(账期起, 账单号)` 先到先得，只隔离后到的重复行，且不参与冲抵 | `app/modules/m8_settlement/rules.py::issued_overlaps`、`app/modules/m8_settlement/ingest.py` | `tests/test_settlement.py::test_chained_overlap_keeps_first_and_drops_only_the_duplicate`、`tests/test_settlement.py::test_overlapping_issued_invoice_is_not_credited` |
 
 ## 对账规则
 
@@ -48,4 +54,6 @@
 - 汇率与多币种未做：样例统一人民币，币种列固定 `CNY`。
 - 变更只支持整日生效：生效时刻按本地日 0 点取整并标记，不做小时级折算。
 - 账期只支持自然月：跨月、跨年区间可算天数，但界面上不提供自定义账期模板。
+- 终止结算只做「承诺一次结清」一种口径：不做按天折减或按未使用月数退款的合同模板。
+- 合同变更（续签、改承诺额）需作为新一年的合同行重新采信，不在原位改历史结算单。
 - 未做并发写保护：单实例 SQLite，写入串行；多实例部署需要改为外部数据库。

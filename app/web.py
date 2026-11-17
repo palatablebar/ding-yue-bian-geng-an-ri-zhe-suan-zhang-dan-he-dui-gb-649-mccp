@@ -26,6 +26,7 @@ NAV = (
     ("/proration", "按日折算", "proration"),
     ("/changes", "变更抵扣", "changes"),
     ("/invoices", "账单对账", "invoices"),
+    ("/settlements", "终止结算", "settlements"),
 )
 
 
@@ -80,7 +81,8 @@ class Ctx:
     def current_run(self, run_id: str | None = None) -> dict | None:
         if run_id:
             return self.store.get_run(run_id)
-        return self.store.latest_run()
+        # 计费批次优先；只有结算批次时也能读隔离区、账单页与台账
+        return self.store.latest_run() or self.store.latest_run(kind="settlement")
 
     def require_run(self, run_id: str | None = None) -> dict | None:
         return self.current_run(run_id)
@@ -109,8 +111,9 @@ def run_or_404(request: Request, run_id: str | None = None) -> dict:
     return run
 
 
-def page_context(ctx: Ctx, run_id: str | None, active: str) -> dict:
-    run = ctx.require_run(run_id)
+def page_context(ctx: Ctx, run_id: str | None, active: str,
+                 run_override: dict | None = None) -> dict:
+    run = run_override if run_override is not None else ctx.require_run(run_id)
     return {
         "run": run,
         "run_id": run["run_id"] if run else "",

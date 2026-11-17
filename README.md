@@ -38,6 +38,22 @@
 | M5 变更抵扣 | 变更序列、替代关系、抵扣行 | `GET /api/changes` |
 | M6 账单对账 | 出账、账单明细、四本账 | `GET /api/invoices` |
 | M7 导出 | 账单 CSV、分段 CSV、清单 JSON | `GET /api/export/invoices.csv` |
+| M8 终止结算 | 年度合同中途终止：停机日、未履行承诺、已出账单三账互证 | `POST /api/settlements/import` |
+
+## 年度合同终止结算
+
+合同承诺 `C` 不可撤销：终止只改服务截止日，不改应收本金。唯一公式是
+
+```
+已出账单 ΣI + 本期终止结算 = 最终应收 = 合同承诺 C
+```
+
+- 停机日含当天：`[合同起, 停机日+1天)` 已服务，`[停机日+1天, 合同止)` 未履行；天数只解释，不折减金额。
+- 已出月份逐张冲抵，不重复收费；未履行部分在本期一次结清。
+- 终止指令幂等：重跑复用批次，换输入只替换同一 `(合同号, 指令)` 的生效版本，不新增结算单。
+- 发布是单事务：核对失败不写一行；发布失败 active 集仍是完整旧版。
+
+口径细节见 `docs/DATA-DICTIONARY.md` 的「年度合同终止结算」。
 
 ## 页面
 
@@ -49,6 +65,7 @@
 | `/proration` | 分段折算与日价 |
 | `/changes` | 变更序列与抵扣行 |
 | `/invoices` | 账单、对账、导出入口、点行看明细 |
+| `/settlements` | 终止结算单、停机日与未履行区间、已出账单冲抵、四本账、导出 |
 
 ## 启动
 
@@ -71,7 +88,7 @@ docker compose up -d --build
 
 定义见 `docs/DATA-DICTIONARY.md`，深度登记与陷阱表见 `docs/DEPTH.md`，运维命令见 `docs/RUNBOOK.md`。
 
-已知不覆盖：只读 CSV（不解析 xlsx）、单币种、变更按整日生效、账期只支持自然月、单实例 SQLite。
+已知不覆盖：只读 CSV（不解析 xlsx）、单币种、变更按整日生效、账期只支持自然月、终止结算只做「承诺一次结清」口径、单实例 SQLite。
 
 ## 目录
 
@@ -79,10 +96,11 @@ docker compose up -d --build
 app/
   main.py config.py errors.py reasons.py manifest.py store.py web.py
   modules/m1_ingest … m7_export/   handler.py service.py + 2 个规则/读写文件
-  templates/  base + 6 页
-  static/     theme.css layout.css components.css app.js table.js invoices.js
+  modules/m8_settlement/           handler.py service.py ingest.py rules.py settlement.py csv_out.py
+  templates/  base + 7 页
+  static/     theme.css layout.css components.css app.js table.js invoices.js settlements.js
 docs/         DEPTH.md DATA-DICTIONARY.md RUNBOOK.md
-sample_data/  7 个脏样例（含 GB18030、截断、空态）
+sample_data/  7 个脏样例（含 GB18030、截断、空态）+ 合同/已出账单终止样例
 tests/        conftest + 每模块 2 个测试文件 + e2e + invariants + fixtures
 ```
 

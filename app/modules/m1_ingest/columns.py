@@ -56,12 +56,22 @@ def change_header(header: list[str]) -> HeaderMap:
     return map_header(header, config.CHANGE_COLUMNS)
 
 
+def contract_header(header: list[str]) -> HeaderMap:
+    return map_header(header, config.CONTRACT_COLUMNS)
+
+
+def issued_header(header: list[str]) -> HeaderMap:
+    return map_header(header, config.ISSUED_COLUMNS)
+
+
 def required_missing(mapping: HeaderMap, required: tuple[str, ...]) -> list[str]:
     return [key for key in required if key not in mapping.canonical]
 
 
 SUB_REQUIRED = ("sub_id", "price", "period_start", "period_end", "state")
 CHANGE_REQUIRED = ("change_id", "sub_id", "effective", "kind")
+CONTRACT_REQUIRED = ("contract_id", "contract_start", "contract_end", "commitment")
+ISSUED_REQUIRED = ("contract_id", "invoice_id", "period_start", "period_end", "amount")
 
 
 def looks_like_header(fields: list[str], spec: dict) -> bool:

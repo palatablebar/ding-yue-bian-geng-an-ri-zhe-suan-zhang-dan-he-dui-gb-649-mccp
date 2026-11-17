@@ -53,6 +53,28 @@ CHANGE_COLUMNS = {
     "new_price": ("新月价(元)", ("新月价(元)", "新月价", "新价格")),
 }
 
+# 年度合同：承诺总额是整份合同的应收，月价只作参考，不参与终止结算
+CONTRACT_COLUMNS = {
+    "contract_id": ("合同号", ("合同号", "合同ID", "合同编号")),
+    "sub_id": ("订阅号", ("订阅号", "订阅ID", "订阅编号")),
+    "account": ("账户", ("账户", "客户名称", "客户", "账户名")),
+    "contract_start": ("合同起", ("合同起", "合同开始", "起租日", "服务起")),
+    "contract_end": ("合同止", ("合同止", "合同结束", "到期日", "服务止")),
+    "commitment": ("合同总额(元)", ("合同总额(元)", "合同总额", "合同承诺", "年度总额")),
+    "stopped_on": ("停机日", ("停机日", "终止日", "停服日", "终止指令", "停机日期")),
+    "termination_id": ("终止指令号", ("终止指令号", "终止号", "结算单号")),
+    "state": ("状态", ("状态", "合同状态")),
+}
+
+# 已出账单：财务已经开票的历史月份，逐张冲抵，避免终止时重复收费
+ISSUED_COLUMNS = {
+    "contract_id": ("合同号", ("合同号", "合同ID", "合同编号")),
+    "invoice_id": ("账单号", ("账单号", "发票号", "账单ID")),
+    "period_start": ("账期起", ("账期起", "期间起", "计费起")),
+    "period_end": ("账期止", ("账期止", "期间止", "计费止")),
+    "amount": ("金额(元)", ("金额(元)", "金额", "账单额", "已出金额")),
+}
+
 STATE_LABELS = {
     "active": "生效中",
     "paused": "已暂停",
@@ -111,6 +133,22 @@ RUN_STATUS_LABELS = {
     "failed": "失败",
 }
 
+# ---- 年度合同终止结算 ----
+# 结算单类型：本期新出的终止结算单；历史已出账单按原账期冲抵
+SETTLEMENT_KIND = "termination"
+SETTLEMENT_KIND_LABELS = {"termination": "终止结算", "period": "期间账单"}
+SETTLEMENT_STATUS_LABELS = {
+    "settled": "已结清",
+    "zero": "零金额",
+    "refund": "退款",
+    "open": "未终止",
+}
+# 未履行部分处理方式：服务义务作废，但合同承诺作为债权在本期一次结清
+TERMINATION_POLICY = "commitment"
+TERMINATION_POLICY_LABELS = {
+    "commitment": "未履行服务作废，合同承诺在本期一次结清",
+}
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -122,6 +160,8 @@ class Settings:
     rule_version: str = RULE_VERSION
     default_subscriptions: str = "subscriptions_dirty.csv"
     default_changes: str = "changes_dirty.csv"
+    default_contracts: str = "contracts_termination.csv"
+    default_issued: str = "issued_invoices.csv"
     export_dir: str = str(PROJECT_ROOT / "var" / "export")
 
     @classmethod

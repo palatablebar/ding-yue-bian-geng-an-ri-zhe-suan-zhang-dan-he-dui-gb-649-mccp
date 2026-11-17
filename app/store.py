@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS runs (
     status TEXT NOT NULL,
     source TEXT NOT NULL,
     rule_version TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'billing',
     created_at TEXT NOT NULL,
     finished_at TEXT,
     input_digest TEXT NOT NULL DEFAULT '',
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS runs (
     note TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_runs_key ON runs(batch_key, status);
+CREATE INDEX IF NOT EXISTS idx_runs_kind ON runs(kind, status, created_at);
 
 CREATE TABLE IF NOT EXISTS inputs (
     run_id TEXT NOT NULL,
@@ -170,6 +172,98 @@ CREATE TABLE IF NOT EXISTS manifests (
     run_id TEXT PRIMARY KEY,
     json TEXT NOT NULL
 );
+
+-- ---- 年度合同终止结算 ----
+-- 合同定义：承诺总额、起止；停机日与终止指令号来自同一条合同行
+CREATE TABLE IF NOT EXISTS contracts (
+    run_id TEXT NOT NULL,
+    contract_id TEXT NOT NULL,
+    sub_id TEXT NOT NULL,
+    account TEXT NOT NULL DEFAULT '',
+    contract_start TEXT NOT NULL,
+    contract_end TEXT NOT NULL,
+    commitment_exact TEXT NOT NULL DEFAULT '0',
+    commitment_cents INTEGER NOT NULL DEFAULT 0,
+    stopped_on TEXT NOT NULL DEFAULT '',
+    termination_id TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT '',
+    source_file TEXT NOT NULL DEFAULT '',
+    row_no INTEGER NOT NULL DEFAULT 0,
+    flags_json TEXT NOT NULL DEFAULT '[]'
+);
+
+-- 已出账单：账期与金额的原值，终止时逐张冲抵
+CREATE TABLE IF NOT EXISTS issued_invoices (
+    run_id TEXT NOT NULL,
+    contract_id TEXT NOT NULL,
+    invoice_id TEXT NOT NULL,
+    period_start TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    days INTEGER NOT NULL DEFAULT 0,
+    amount_exact TEXT NOT NULL DEFAULT '0',
+    amount_cents INTEGER NOT NULL DEFAULT 0,
+    usable INTEGER NOT NULL DEFAULT 1,
+    source_file TEXT NOT NULL DEFAULT '',
+    row_no INTEGER NOT NULL DEFAULT 0,
+    flags_json TEXT NOT NULL DEFAULT '[]'
+);
+
+-- 终止指令 → 结算单：一条指令只生成一张，重跑按 (contract_id, termination_key) 复用
+CREATE TABLE IF NOT EXISTS settlements (
+    run_id TEXT NOT NULL,
+    settlement_id TEXT NOT NULL,
+    termination_key TEXT NOT NULL,
+    contract_id TEXT NOT NULL,
+    sub_id TEXT NOT NULL,
+    account TEXT NOT NULL DEFAULT '',
+    contract_start TEXT NOT NULL,
+    contract_end TEXT NOT NULL,
+    stopped_on TEXT NOT NULL,
+    period_days INTEGER NOT NULL,
+    served_days INTEGER NOT NULL,
+    unserved_days INTEGER NOT NULL,
+    commitment_cents INTEGER NOT NULL,
+    issued_cents INTEGER NOT NULL,
+    issued_count INTEGER NOT NULL,
+    remainder_cents INTEGER NOT NULL,
+    remainder_exact TEXT NOT NULL DEFAULT '0',
+    payable_cents INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'settled',
+    flags_json TEXT NOT NULL DEFAULT '[]'
+);
+
+-- 结算单成分：已出月份逐张冲抵 + 未履行承诺一次结清
+CREATE TABLE IF NOT EXISTS settlement_lines (
+    run_id TEXT NOT NULL,
+    settlement_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
+    label TEXT NOT NULL DEFAULT '',
+    period_start TEXT NOT NULL DEFAULT '',
+    period_end TEXT NOT NULL DEFAULT '',
+    days INTEGER NOT NULL DEFAULT 0,
+    exact_text TEXT NOT NULL DEFAULT '0',
+    cents INTEGER NOT NULL DEFAULT 0,
+    flags_json TEXT NOT NULL DEFAULT '[]'
+);
+
+-- 发布态：每个合同只能有一张生效的终止结算单（一次终止只结算一次）
+CREATE TABLE IF NOT EXISTS settlement_versions (
+    version_id TEXT PRIMARY KEY NOT NULL,
+    contract_id TEXT NOT NULL,
+    termination_key TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    superseded_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_versions_active
+    ON settlement_versions(status, contract_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_versions_single_active
+    ON settlement_versions(contract_id)
+    WHERE status = 'active';
 """
 
 
@@ -185,7 +279,31 @@ class Store:
         self.path = str(path)
         Path(self.path).resolve().parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
+            self._migrate(conn)
             conn.executescript(SCHEMA)
+
+    @staticmethod
+    def _migrate(conn) -> None:
+        """把旧库补到当前列集：只增列、不删不改，已有数据原样保留。
+
+        必须在 `executescript(SCHEMA)` 之前跑：SCHEMA 里对新列建了索引，
+        旧表缺列时先建索引会直接抛 `no such column`。
+        """
+        additions = {
+            "runs": {"kind": "TEXT NOT NULL DEFAULT 'billing'"},
+            "issued_invoices": {"usable": "INTEGER NOT NULL DEFAULT 1"},
+        }
+        for table, columns in additions.items():
+            existing = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)).fetchone()
+            if existing is None:
+                continue
+            present = {row["name"] for row in
+                       conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            for name, ddl in columns.items():
+                if name not in present:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
     @contextmanager
     def connect(self):
@@ -205,15 +323,16 @@ class Store:
         with self.connect() as conn:
             conn.execute(
                 """INSERT INTO runs (run_id, batch_key, status, source, rule_version,
-                        created_at, finished_at, input_digest, params_json, counters_json, note)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                        kind, created_at, finished_at, input_digest, params_json,
+                        counters_json, note)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(run_id) DO UPDATE SET
                      status=excluded.status, finished_at=excluded.finished_at,
                      input_digest=excluded.input_digest,
                      counters_json=excluded.counters_json""",
                 (run["run_id"], run["batch_key"], run["status"], run["source"],
-                 run["rule_version"], run["created_at"], run.get("finished_at"),
-                 run.get("input_digest", ""),
+                 run["rule_version"], run.get("kind", "billing"), run["created_at"],
+                 run.get("finished_at"), run.get("input_digest", ""),
                  json.dumps(run.get("params", {}), ensure_ascii=False),
                  json.dumps(run.get("counters", {}), ensure_ascii=False),
                  run.get("note", "")),
@@ -240,30 +359,41 @@ class Store:
             row = conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
         return self._run_row(row) if row else None
 
-    def find_run_by_key(self, batch_key: str, status: str = "done") -> dict | None:
+    def find_run_by_key(self, batch_key: str, status: str = "done",
+                        kind: str = "billing") -> dict | None:
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT * FROM runs WHERE batch_key=? AND status=? ORDER BY created_at LIMIT 1",
-                (batch_key, status)).fetchone()
+                "SELECT * FROM runs WHERE batch_key=? AND status=? AND kind=? "
+                "ORDER BY created_at LIMIT 1",
+                (batch_key, status, kind)).fetchone()
         return self._run_row(row) if row else None
 
-    def latest_run(self, status: str | None = None) -> dict | None:
+    def latest_run(self, status: str | None = None,
+                   kind: str = "billing") -> dict | None:
         with self.connect() as conn:
             if status:
                 row = conn.execute(
-                    "SELECT * FROM runs WHERE status=? ORDER BY created_at DESC, rowid DESC "
-                    "LIMIT 1", (status,)).fetchone()
+                    "SELECT * FROM runs WHERE status=? AND kind=? "
+                    "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    (status, kind)).fetchone()
             else:
                 row = conn.execute(
-                    "SELECT * FROM runs ORDER BY created_at DESC, rowid DESC LIMIT 1"
+                    "SELECT * FROM runs WHERE kind=? "
+                    "ORDER BY created_at DESC, rowid DESC LIMIT 1", (kind,)
                 ).fetchone()
         return self._run_row(row) if row else None
 
-    def list_runs(self, limit: int = 30) -> list[dict]:
+    def list_runs(self, limit: int = 30, kind: str | None = None) -> list[dict]:
         with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM runs ORDER BY created_at DESC, rowid DESC LIMIT ?",
-                (limit,)).fetchall()
+            if kind:
+                rows = conn.execute(
+                    "SELECT * FROM runs WHERE kind=? "
+                    "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                    (kind, limit)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM runs ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                    (limit,)).fetchall()
         return [self._run_row(row) for row in rows]
 
     @staticmethod
@@ -558,3 +688,257 @@ class Store:
             for table in ("segments", "components", "invoices", "stages", "totals",
                           "reconciliations"):
                 conn.execute(f"DELETE FROM {table} WHERE run_id=?", (run_id,))
+
+    # ---------- 年度合同终止结算 ----------
+    def put_contracts(self, run_id: str, items: list[dict]) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM contracts WHERE run_id=?", (run_id,))
+            conn.executemany(
+                """INSERT INTO contracts (run_id, contract_id, sub_id, account,
+                        contract_start, contract_end, commitment_exact, commitment_cents,
+                        stopped_on, termination_id, state, source_file, row_no, flags_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(run_id, item["contract_id"], item["sub_id"], item.get("account", ""),
+                  item["contract_start"], item["contract_end"],
+                  str(item.get("commitment_exact", "0")),
+                  int(item.get("commitment_cents", 0)), item.get("stopped_on", ""),
+                  item.get("termination_id", ""), item.get("state", ""),
+                  item.get("source_file", ""), int(item.get("row_no", 0)),
+                  json.dumps(item.get("flags", []), ensure_ascii=False))
+                 for item in items],
+            )
+
+    def list_contracts(self, run_id: str) -> list[dict]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM contracts WHERE run_id=? ORDER BY contract_id", (run_id,)
+            ).fetchall()
+        out = []
+        for row in rows:
+            data = dict(row)
+            data["flags"] = _loads(data.pop("flags_json", "[]"), [])
+            out.append(data)
+        return out
+
+    def put_issued(self, run_id: str, items: list[dict]) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM issued_invoices WHERE run_id=?", (run_id,))
+            conn.executemany(
+                """INSERT INTO issued_invoices (run_id, contract_id, invoice_id,
+                        period_start, period_end, days, amount_exact, amount_cents,
+                        usable, source_file, row_no, flags_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(run_id, item["contract_id"], item["invoice_id"],
+                  item["period_start"], item["period_end"], int(item.get("days", 0)),
+                  str(item.get("amount_exact", "0")), int(item.get("amount_cents", 0)),
+                  int(item.get("usable", 1)),
+                  item.get("source_file", ""), int(item.get("row_no", 0)),
+                  json.dumps(item.get("flags", []), ensure_ascii=False))
+                 for item in items],
+            )
+
+    def list_issued(self, run_id: str, contract_id: str | None = None) -> list[dict]:
+        with self.connect() as conn:
+            if contract_id:
+                rows = conn.execute(
+                    "SELECT * FROM issued_invoices WHERE run_id=? AND contract_id=? "
+                    "ORDER BY period_start, invoice_id", (run_id, contract_id)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM issued_invoices WHERE run_id=? "
+                    "ORDER BY contract_id, period_start, invoice_id", (run_id,)).fetchall()
+        out = []
+        for row in rows:
+            data = dict(row)
+            data["flags"] = _loads(data.pop("flags_json", "[]"), [])
+            data["usable"] = bool(data.get("usable", 1))
+            out.append(data)
+        return out
+
+    def put_settlements(self, run_id: str, items: list[dict],
+                        lines: list[dict]) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM settlements WHERE run_id=?", (run_id,))
+            conn.execute("DELETE FROM settlement_lines WHERE run_id=?", (run_id,))
+            conn.executemany(
+                """INSERT INTO settlements (run_id, settlement_id, termination_key,
+                        contract_id, sub_id, account, contract_start, contract_end,
+                        stopped_on, period_days, served_days, unserved_days,
+                        commitment_cents, issued_cents, issued_count, remainder_cents,
+                        remainder_exact, payable_cents, status, flags_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(run_id, item["settlement_id"], item["termination_key"],
+                  item["contract_id"], item["sub_id"], item.get("account", ""),
+                  item["contract_start"], item["contract_end"], item["stopped_on"],
+                  int(item["period_days"]), int(item["served_days"]),
+                  int(item["unserved_days"]), int(item["commitment_cents"]),
+                  int(item["issued_cents"]), int(item["issued_count"]),
+                  int(item["remainder_cents"]), str(item.get("remainder_exact", "0")),
+                  int(item["payable_cents"]), item.get("status", "settled"),
+                  json.dumps(item.get("flags", []), ensure_ascii=False))
+                 for item in items],
+            )
+            conn.executemany(
+                """INSERT INTO settlement_lines (run_id, settlement_id, seq, kind,
+                        source, label, period_start, period_end, days, exact_text,
+                        cents, flags_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                [(run_id, item["settlement_id"], int(item["seq"]), item["kind"],
+                  item.get("source", ""), item.get("label", ""),
+                  item.get("period_start", ""), item.get("period_end", ""),
+                  int(item.get("days", 0)), str(item.get("exact_text", "0")),
+                  int(item["cents"]),
+                  json.dumps(item.get("flags", []), ensure_ascii=False))
+                 for item in lines],
+            )
+
+    def list_settlements(self, run_id: str) -> list[dict]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM settlements WHERE run_id=? "
+                "ORDER BY stopped_on, contract_id", (run_id,)).fetchall()
+        out = []
+        for row in rows:
+            data = dict(row)
+            data["flags"] = _loads(data.pop("flags_json", "[]"), [])
+            out.append(data)
+        return out
+
+    def list_settlement_lines(self, run_id: str,
+                              settlement_id: str | None = None) -> list[dict]:
+        with self.connect() as conn:
+            if settlement_id:
+                rows = conn.execute(
+                    "SELECT * FROM settlement_lines WHERE run_id=? AND settlement_id=? "
+                    "ORDER BY seq", (run_id, settlement_id)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM settlement_lines WHERE run_id=? "
+                    "ORDER BY settlement_id, seq", (run_id,)).fetchall()
+        out = []
+        for row in rows:
+            data = dict(row)
+            data["flags"] = _loads(data.pop("flags_json", "[]"), [])
+            out.append(data)
+        return out
+
+    def get_settlement(self, run_id: str, settlement_id: str) -> dict | None:
+        for row in self.list_settlements(run_id):
+            if row["settlement_id"] == settlement_id:
+                return row
+        return None
+
+    # ---------- 结算发布态（原子切换） ----------
+    def active_versions(self) -> dict[tuple[str, str], dict]:
+        """当前发布的结算版本，按 (合同号, 终止指令键) 索引；只读 active。"""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM settlement_versions WHERE status='active' "
+                "ORDER BY contract_id, termination_key").fetchall()
+        return {(row["contract_id"], row["termination_key"]):
+                self._version_row(row) for row in rows}
+
+    def versions_for_contract(self, contract_id: str) -> list[dict]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM settlement_versions WHERE contract_id=? "
+                "ORDER BY created_at DESC, rowid DESC", (contract_id,)).fetchall()
+        return [self._version_row(row) for row in rows]
+
+    @staticmethod
+    def _version_row(row: sqlite3.Row) -> dict:
+        data = dict(row)
+        data["payload"] = _loads(data.pop("payload_json", "{}"), {})
+        return data
+
+    def get_version(self, version_id: str) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM settlement_versions WHERE version_id=?",
+                (version_id,)).fetchone()
+        return self._version_row(row) if row else None
+
+    def publish_settlement_versions(self, versions: list[dict],
+                                    created_at: str,
+                                    snapshot: bool = False) -> dict:
+        """原子发布：同一事务内完成「旧版作废 → 新版写入 → 快照外撤下」。
+
+        - 一个合同只允许一张生效结算单，旧指令不论叫什么都会先整体作废；
+        - `snapshot=True` 表示本次输入是完整快照：不在本次结果里的 active 版本
+          在同一事务里被撤下（合同行被删除、终止指令被撤销都靠这条路径收口）；
+        - 任一步失败（含唯一索引冲突）整体回滚，active 集保持发布前的完整旧版，
+          不允许出现「一半新、一半旧」的发布态。
+        """
+        published, reused, withdrawn = [], [], []
+        with self.connect() as conn:
+            keep: set[tuple[str, str]] = set()
+            for version in versions:
+                payload = json.dumps(version["payload"], ensure_ascii=False,
+                                     sort_keys=True)
+                current = conn.execute(
+                    "SELECT * FROM settlement_versions WHERE status='active' "
+                    "AND contract_id=?", (version["contract_id"],)).fetchone()
+                if (current is not None
+                        and current["termination_key"] == version["termination_key"]
+                        and current["payload_json"] == payload):
+                    reused.append(self._version_row(current))
+                    keep.add((current["contract_id"], current["termination_key"]))
+                    continue
+                conn.execute(
+                    "UPDATE settlement_versions SET status='superseded', "
+                    "superseded_at=? WHERE status='active' AND contract_id=?",
+                    (created_at, version["contract_id"]))
+                previous = conn.execute(
+                    "SELECT * FROM settlement_versions WHERE version_id=?",
+                    (version["version_id"],)).fetchone()
+                if previous is not None:
+                    conn.execute(
+                        "UPDATE settlement_versions SET status='active', "
+                        "superseded_at=NULL, run_id=?, payload_json=? "
+                        "WHERE version_id=?",
+                        (version["run_id"], payload, version["version_id"]))
+                else:
+                    conn.execute(
+                        """INSERT INTO settlement_versions (version_id, contract_id,
+                                termination_key, run_id, payload_json, status, created_at)
+                           VALUES (?,?,?,?,?,'active',?)""",
+                        (version["version_id"], version["contract_id"],
+                         version["termination_key"], version["run_id"], payload,
+                         created_at))
+                published.append({"version_id": version["version_id"],
+                                  "contract_id": version["contract_id"],
+                                  "termination_key": version["termination_key"]})
+                keep.add((version["contract_id"], version["termination_key"]))
+            if snapshot:
+                rows = conn.execute(
+                    "SELECT version_id, contract_id, termination_key "
+                    "FROM settlement_versions WHERE status='active'").fetchall()
+                for row in rows:
+                    if (row["contract_id"], row["termination_key"]) in keep:
+                        continue
+                    conn.execute(
+                        "UPDATE settlement_versions SET status='superseded', "
+                        "superseded_at=? WHERE version_id=?",
+                        (created_at, row["version_id"]))
+                    withdrawn.append(row["version_id"])
+        return {"published": published, "reused": len(reused),
+                "withdrawn": withdrawn}
+
+    def rollback_publish(self, version_ids: list[str],
+                         created_at: str) -> None:
+        """发布后人工回退：把指定 active 版本作废，保留记录以便复核。
+
+        正常发布是单事务，失败自动回滚，不需要调用。
+        """
+        with self.connect() as conn:
+            for version_id in version_ids:
+                conn.execute(
+                    "UPDATE settlement_versions SET status='superseded', "
+                    "superseded_at=? WHERE version_id=? AND status='active'",
+                    (created_at, version_id))
+
+    def version_count(self) -> int:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM settlement_versions").fetchone()
+        return int(row["n"])

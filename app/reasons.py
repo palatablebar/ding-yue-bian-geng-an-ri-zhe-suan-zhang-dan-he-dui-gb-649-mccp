@@ -49,6 +49,32 @@ REASONS: dict[str, tuple[str, str]] = {
     "R_DUP_INVOICE": ("error", "同一订阅同一期间出现两张账单"),
     "R_INVOICE_ZERO": ("info", "账单金额为零"),
     "R_ROUND_ADJUST": ("info", "尾差按最大余额分配到分"),
+    # ---- 年度合同终止结算 ----
+    # 合同定义（承诺、起止）无法采信
+    "R_CONTRACT_KEY_MISSING": ("error", "合同号缺失"),
+    "R_CONTRACT_PERIOD": ("error", "合同起止无法解析或止早于起"),
+    "R_CONTRACT_DATE": ("error", "合同起止日期格式无法解析"),
+    "R_CONTRACT_COMMITMENT": ("error", "合同总额缺失、无法解析或为负"),
+    "R_CONTRACT_DUP_KEY": ("error", "合同号重复且取值冲突"),
+    "R_CONTRACT_DUP_ROW": ("info", "合同号重复且取值相同"),
+    # 终止指令
+    "R_TERMINATION_UNKNOWN_CONTRACT": ("error", "终止指令引用未知合同"),
+    "R_TERMINATION_BEFORE_START": ("error", "停机日早于合同起"),
+    "R_TERMINATION_AFTER_END": ("error", "停机日不早于合同止"),
+    "R_TERMINATION_NO_STOP": ("warn", "合同标记终止但缺停机日"),
+    "R_TERMINATION_ID_DERIVED": ("info", "终止指令号缺失，按合同号与停机日派生"),
+    "R_TERMINATION_DUP": ("warn", "同一合同出现多条不同终止指令"),
+    "R_TERMINATION_REUSED": ("info", "同一终止指令重跑，复用原结算单"),
+    "R_TERMINATION_DUP_GENERATED": ("error", "同一合同重复生成终止结算单"),
+    "R_TERMINATION_MISSING_REMAINDER": ("error", "终止结算单缺少未履行承诺"),
+    # 已出账单
+    "R_ISSUED_UNKNOWN_CONTRACT": ("error", "已出账单引用未知合同"),
+    "R_ISSUED_PERIOD": ("error", "已出账期无法解析或落在合同外"),
+    "R_ISSUED_AMOUNT": ("error", "已出账单金额无法解析或为负"),
+    "R_ISSUED_OVERLAP": ("error", "已出账单账期重叠，存在重复收费"),
+    "R_DUP_INVOICE_ROW": ("info", "已出账单重复且取值相同"),
+    "R_ISSUED_AFTER_STOP": ("warn", "已出账单账期跨过或晚于停机日"),
+    "R_ISSUED_OVER_COMMITMENT": ("warn", "已出账单超过合同承诺，结算为退款"),
 }
 
 LEVEL_LABELS = {"error": "隔离", "warn": "复核", "info": "归一"}

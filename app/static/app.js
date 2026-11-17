@@ -65,15 +65,44 @@ async function checkDays() {
   }
 }
 
+async function runSettlement() {
+  if (state.busy) return;
+  state.busy = true;
+  toast2("结算中…", "muted");
+  const contracts = document.getElementById("contract-file")?.value.trim();
+  const issued = document.getElementById("issued-file")?.value.trim();
+  try {
+    const data = await postJSON("/api/settlements/import", { contracts, issued });
+    const totals = data.totals || {};
+    const label = data.reused ? "复用" : "完成";
+    toast2(`${label} ${data.run_id} · 结算单 ${totals.settlements ?? 0} 张 · 最终应收 ${totals.final_receivable_cents ?? 0} 分`,
+      "muted");
+    setTimeout(() => window.location.assign("/settlements"), 600);
+  } catch (error) {
+    toast2(error.message, "error");
+  } finally {
+    state.busy = false;
+  }
+}
+
+function toast2(text, tone) {
+  const node = document.getElementById("settlement-toast");
+  if (!node) return;
+  node.textContent = text;
+  node.className = tone === "error" ? "notice" : "toast";
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("run-import")?.addEventListener("click", runImport);
+  document.getElementById("run-settlement")?.addEventListener("click", runSettlement);
   document.getElementById("day-check")?.addEventListener("click", checkDays);
   document.querySelectorAll(".field input").forEach((input) => {
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
         if (document.getElementById("run-import")) runImport();
-        else if (document.getElementById("day-check")) checkDays();
+        if (document.getElementById("run-settlement")) runSettlement();
+        if (document.getElementById("day-check")) checkDays();
       }
     });
   });

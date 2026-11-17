@@ -37,6 +37,38 @@ curl -s -o /tmp/invoices.csv http://127.0.0.1:18208/api/export/invoices.csv
 curl -s -o /tmp/manifest.json http://127.0.0.1:18208/api/export/manifest.json
 ```
 
+## 年度合同终止结算
+
+```bash
+# 采信合同与已出账单（样例自带 3 条隔离：重叠账期、未知合同、到期日停机）
+curl -s -X POST http://127.0.0.1:18208/api/settlements/import \
+  -H 'Content-Type: application/json' -d '{}'
+
+# 结算单与合计（页面 /settlements 读同一组数字）
+curl -s http://127.0.0.1:18208/api/settlements
+curl -s -o /tmp/settlements.csv http://127.0.0.1:18208/api/settlements.csv
+curl -s -o /tmp/settlement-lines.csv http://127.0.0.1:18208/api/settlements/detail.csv
+curl -s -o /tmp/settlement-manifest.json http://127.0.0.1:18208/api/settlements/manifest.json
+curl -s http://127.0.0.1:18208/api/contracts
+```
+
+合同表必需列：`合同号`、`合同起`、`合同止`、`合同总额(元)`；可选 `订阅号`、`账户`、`停机日`、`终止指令号`、`状态`。
+已出账单表必需列：`合同号`、`账单号`、`账期起`、`账期止`、`金额(元)`。
+
+复核顺序建议：
+
+1. 看 `/settlements` 顶部四个数：承诺 = 已出 + 本期结算 = 最终应收；
+2. 看「合同与已出账单」逐份合同：停机日、未履行区间、已出月份是否齐全，重叠账单标「未冲抵」；
+3. 看「结算对账」四本账是否全平；
+4. 点结算单看成分：第一行承诺，其后每张已出账单一行负数。
+
+**重跑与修正**
+
+- 同两份文件再采信：命中 `batch_key`，直接返回原批次，结算单不新增。
+- 改了输入（金额或停机日）：新批次会替换同一 `(合同号, 指令键)` 的生效版本，结算单号不变。
+- 删掉某份合同的停机日：该合同旧结算单在同一次发布事务里撤下，页面不再出现。
+- 发布核对失败返回 409 `E_SETTLEMENT_VERIFY`，库内 `active` 集不动；批次记 `failed` 可查原因。
+
 ## 换成自己的数据
 
 样例目录挂载在容器 `/app/sample_data`，采信时传文件名即可（只接受纯文件名）：
